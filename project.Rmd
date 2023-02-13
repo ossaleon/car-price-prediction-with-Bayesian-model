@@ -1,0 +1,269 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Import data
+data =  read.table("ford.txt", header = TRUE)
+
+# setup data
+# Categorical variables
+data$model <- as.factor(data$model)
+data$transmission <- as.factor(data$transmission)
+data$fuelType <- as.factor(data$fuelType)
+
+# Summary
+summary(data, maxsum = 18)
+
+# data plots
+plot(data$model,data$price)
+plot(data$year,data$price)
+plot(data$transmission,data$price)
+plot(data$mileage,data$price)
+plot(data$mpg,data$price)
+plot(data$engineSize,data$price)
+plot(data$fuelType,data$price)
+plot(data$tax,data$price)
+
+
+
+```
+
+```{r}
+# clean data
+# some rows has engine size = 0 and tax = 0
+data[data$engineSize == 0, ] 
+data[data$tax == 0, ]
+
+#drop that rows
+data = data[data$engineSize != 0, ]
+data = data[data$tax != 0, ]
+
+# Normalize data
+data[, 'year'] <- data[, 'year'] - 2018  
+data[,'mileage'] <- data[,'mileage']/10000
+data[,'tax'] <- data[,'tax']/100
+data[,'mpg'] <- data[,'mpg']/100
+
+# model fiesta as reference
+data$model <- relevel(data$model, ref =" Fiesta")
+```
+
+```{r}
+# split in training and test set randomly in 80/20
+n = (nrow(data)*0.2)%/%1
+set.seed(123)
+picked <- sample(seq_len(nrow(data)),size = n)
+test_set <- data[picked,]
+data_learning <- data[-picked,]
+
+```
+
+```{r}
+# Frequentist model
+library(car)
+fulllm=lm(price ~ ., data = data_learning)
+summary(fulllm)
+
+vif(fulllm)
+```
+
+
+```{r}
+library(BAS)
+
+# G-prior
+alphapar = 20
+cog.bas = bas.lm(price ~ ., data = data_learning, prior="g-prior", alpha = alphapar, modelprior = Bernoulli(1), include.always = ~ ., n.models = 1)
+
+beta = coef(cog.bas)
+plot(beta, subset = 2:27, ask = F)
+
+
+# Combine results and construct summary table
+out = confint(beta)[, 1:2]
+names = c("posterior mean", "posterior std", colnames(out))
+out = cbind(beta$postmean, beta$postsd, out)
+colnames(out) = names
+
+print(round(out,3))
+plot(confint(beta),main=paste("g-prior alpha=",alphapar))
+
+# mean of the price for each model, useful to verify the beta fro the models dummy variables
+tapply(data$price, data$model, summary)
+```
+
+```{r}
+library(BAS)
+
+# Zellner-Siow
+cog.basZS = bas.lm(price ~ ., data =  data_learning, prior="JZS", modelprior = Bernoulli(1), include.always = ~ ., n.models = 1)
+
+betaZS = coef(cog.basZS)
+plot(betaZS,subset = 2:27, ask = F)
+
+
+# Combine results and construct summary table
+outZS = confint(betaZS)[, 1:2]
+names = c("posterior mean", "posterior std", colnames(outZS))
+outZS = cbind(betaZS$postmean, betaZS$postsd, outZS)
+colnames(outZS) = names
+
+print(round(outZS,3))
+plot(confint(betaZS),main=paste("zellner-siow"))
+```
+
+```{r}
+# Compare G-prior and Zellner-Siow
+
+plot(confint(beta),main=paste("g-prior alpha=",alphapar))
+plot(confint(betaZS),main=paste("zellner-siow"))
+
+```
+
+```{r}
+# Correlation between predictors
+data_correlation = dummy_cols(data_learning, select_columns = c('model', 'transmission', 'fuelType'), remove_selected_columns = TRUE, remove_first_dummy = TRUE)
+X = data_correlation[, -2]
+Y = data_correlation[, 2]
+p = dim(X)[2]
+boh = c('', 'year', 'price', 'mileage', 'tax', 'mpg', 'engineSize', 'B-MAX', 'C-MAX', 'EcoSport', 'Edge', 'Focus', 'Galaxy', 'Grand Tourneo Connect', 'KA', 'Ka+', 'Kuga',
+                       'Mondeo', 'Mustang', 'Puma', 'S-MAX', 'Tourneo Connect', 'Tourneo Custom', 'Manual', 'Semi-Auto', 'Hybrid', 'Petrol')
+pp=p+1
+image(1:pp,1:pp,abs(cor(cbind(Y, X))),
+      xlab="",ylab="",main="Correlation between predictors",
+      axes=FALSE,col=gray(1-seq(0,1,.01)))
+axis(1,1:pp,labels = colnames(data_correlation),las=2)
+axis(2,1:pp,labels = colnames(data_correlation),las=2)
+```
+
+```{r}
+library(BAS)
+
+# Model selection with BIC
+cog.BIC = bas.lm(price ~ ., data = data_learning,
+                 prior = "BIC", modelprior = uniform())
+round(summary(cog.BIC), 3)
+
+
+# Find the index of the model with the largest logmarg
+best = which.max(cog.BIC$logmarg)
+# Retreat the index of variables in the best model, 0 is the intercept index
+bestmodel = cog.BIC$which[[best]]+1
+
+# 0 vector with length equal to the number of variables in the full model
+bestgamma = rep(0, cog.BIC$n.vars)
+# Change the indicator to 1 where variables are used
+bestgamma[bestmodel] = 1
+
+
+# Fit the best BIC model. Impose the variables to use via bestgamma
+bestBIC = bas.lm(price ~ ., data = data_learning, prior = "BIC",
+                     modelprior=uniform(), n.models=1, bestmodel=bestgamma)
+# Retreat coefficients information
+beta.bestBIC = coef(bestBIC)
+# Retreat bounds of credible intervals
+out = confint(beta.bestBIC)[, 1:2]
+
+# Combine results and construct summary table
+coef.BIC = cbind(beta.bestBIC$postmean, beta.bestBIC$postsd, out)
+names = c("post mean", "post sd", colnames(out))
+colnames(coef.BIC) = names
+
+round(coef.BIC[bestmodel,], 3)
+plot(confint(beta.bestBIC),main=paste("BIC"))
+
+```
+
+
+
+```{r}
+# Compare G-prior, Zellner-Siow and BIC
+
+plot(confint(beta),main=paste("g-prior alpha=",alphapar))
+plot(confint(betaZS),main=paste("zellner-siow"))
+plot(confint(beta.bestBIC),main=paste("BIC"))
+```
+
+```{r}
+library(fastDummies)
+library(rjags)
+
+model_string2 <- "model{
+
+  # Likelihood
+  for(i in 1:n){
+    Y[i]   ~ dnorm(mu[i],inv.var)
+    mu[i] <- alpha + inprod(X[i,],beta[])
+  }
+
+  # Prior for beta
+  for(j in 1:p){
+    beta[j] ~ ddexp(0,inv.var*inv.var.b)
+  }
+
+  # Prior for the inverse variance
+  inv.var   ~ dgamma(0.01, 0.01)
+  inv.var.b ~ dgamma(0.01, 0.01)
+  alpha     ~ dnorm(0, 0.01)
+
+}"
+
+data_learning_lasso <- dummy_cols(data_learning, select_columns = c('model', 'transmission', 'fuelType'), remove_selected_columns = TRUE, remove_first_dummy = TRUE)
+X = data_learning_lasso[,-2]
+DATA = list(Y=data_learning_lasso[,2],n=dim(X)[1],p=dim(X)[2],X=X)
+model2 <- jags.model(textConnection(model_string2), data =DATA ) 
+```
+```{r}
+library(coda)
+
+burn     <- 1000
+n.iter   <- 1000
+thin     <- 10
+n.chains <- 2
+
+update(model2, burn, progress.bar="none")
+  
+samples2 <- coda.samples(model2,variable.names=c("beta","alpha"),thin=thin, n.iter=n.iter, progress.bar="none")
+
+summary(samples2)
+```
+
+
+```{r}
+# selection of the model
+model = #cog.bas  
+        #cog.basZS
+        bestBIC
+
+beta = coef(model)
+
+
+# fit model with trainig set
+fitted<-predict(model, estimator = "BMA")
+
+# fit model test set
+prednew <- predict(model,newdata=test_set, estimator = "BMA")
+
+#plot the predictions
+plot(fitted$Ypred[1:length(fitted$Ypred)],data_learning$price[1:length(fitted$Ypred)],
+  pch =20,
+  xlab = expression(hat(mu[i])), ylab = 'Y',type="p")
+
+
+
+points(prednew$Ypred, test_set$price,
+  pch = 20,
+  col="red",type="p"
+)
+abline(0, 1)
+
+
+
+# prediction of few test data with confidence
+BPM <- predict(model, estimator = "BPM", newdata=test_set[1:30,], se.fit = TRUE)
+conf.pred <- confint(BPM, parm = "pred")
+plot(conf.pred, main="Out of sample: pred. (black) vs true (red)")
+points(seq(1:30),test_set[1:30,]$price,col="red")
+```
